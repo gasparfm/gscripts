@@ -29,6 +29,7 @@
 # - 20141208: Allows us to send many attachments 
 # - 20141211: Removed extra \n when no extra headers
 # - 20141212: Preview mode and additional sendmail find
+# - 20150113: Bug fix (sendmail with no arguments)
 
 # To do:
 #  - Doc and examples !!!
@@ -71,7 +72,7 @@ function callsend()
     then
 	cat
     else
-	$SENDMAIL_COMMAND
+	$SENDMAIL_COMMAND $_TO
     fi
 }
 
