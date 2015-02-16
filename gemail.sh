@@ -30,6 +30,10 @@
 # - 20141211: Removed extra \n when no extra headers
 # - 20141212: Preview mode and additional sendmail find
 # - 20150113: Bug fix (sendmail with no arguments)
+# - 20150210: Added SENDMAIL_BASIC_ARGS to call sendmail -t and allow more recipients
+# - 20150210: Bug fix separate recipient and non-recipient headers (for some reason some
+#             mailers didn't do it right when they are mixed.
+# - 20150216: Allow body to be read from stdin
 
 # To do:
 #  - Doc and examples !!!
@@ -37,14 +41,28 @@
 #MAIL_BOUNDARY="m41lb0und4ry"		# We can randomize it later
 MAIL_BOUNDARY=`cat /dev/urandom | tr -dc 'a-zA-Z0-9' | head -c 40`
 SENDMAIL_COMMAND=`which sendmail`
+# Read recipients from mail (to use CC and so)
+SENDMAIL_BASIC_ARGS="-t"
 SENDMAIL_COMMAND="";
 function showUsage()
 {
 # We must extend this help to use headers ans so
 	echo $1
 	echo "Use:"
-	echo $2 destination subject body [attachment1] [attachment2] ... [attachmentN]
+	echo "  $2 destination subject body [attachment1] [attachment2] ... [attachmentN]"
 	echo
+	echo "or:"
+	echo
+	echo "  $2 destination subject [attachment1] [attachment2] ... [attachmentN] < bodyfile"
+	echo
+	echo "You can also insert some more headers after the attachments:"
+	echo "  \"From: me@email.ext\" or \"From: Me <me@myself.ext>\" to specify my email"
+	echo "  \"CC: my@email.ext\" or \"CC: My friend <my@friend.ext>\" for carbon copy"
+	echo "  \"BCC: my@email.ext\" or \"BCC: My friend <my@friend.ext>\" for blind carbon copy"
+	echo "  \"Reply-to: another@email.com\" for a new reply-to address";
+	echo "  Another headers accepted: Date, Organization, X-Mailer"
+	echo
+	echo "You can use the keyword *preview* to print the command to be executed (if you have attached files the output can be large)"
 	exit
 }
 
@@ -72,14 +90,25 @@ function callsend()
     then
 	cat
     else
-	$SENDMAIL_COMMAND $_TO
+	$SENDMAIL_COMMAND $SENDMAIL_BASIC_ARGS $_TO
     fi
 }
+
+# Required arguments (destination, subject, body)
+NUMARGS=3;
 
 #Basic arguments of our program
 TO=$1
 SUBJECT=$2
 BODY=$3
+
+# If we have data in /dev/stdin pick up the email body from /dev/stdin
+if [ ! -t 0 ]
+then
+    BODY=$(cat /dev/stdin)
+    NUMARGS=2;
+fi
+
 PREVIEW=0
 
 # Additional sendmail find if not in PATH
@@ -94,7 +123,7 @@ then
     exit;
 fi
 
-if (( $# < 3 ))
+if (( $# < $NUMARGS ))
 then
 	showUsage "Invalid arguments" $0
 fi
@@ -102,7 +131,8 @@ fi
 # Fill attachments and additional user headers
 ATTACHMENTS=""
 MOREHEADERS=""
-for (( i=4; $i<=$#; i++))
+RECIPIENTS=""
+for (( i=$(($NUMARGS+1)); $i<=$#; i++))
 do
 	ATTACH="${!i}"
 	if [ ! -r "$ATTACH" ];
@@ -113,7 +143,16 @@ do
 	    read -a HEADER <<< "$ATTACH"
 	    IFS=$OLDIFS
 	    case ${HEADER[0]} in
-		"From" | "Reply-to" | "Date" | "X-Mailer" | "Organization" | "CC" | "BCC" )
+		# Separating headers for some mail systems
+		"From" | "Reply-to" | "CC" | "BCC" )
+		    if [ -z "$RECIPIENTS" ]
+		    then
+			RECIPIENTS=$ATTACH
+		    else
+			RECIPIENTS="`echo -e "$RECIPIENTS""\n""$ATTACH"`"
+		    fi 
+		    ;;
+		"Date" | "X-Mailer" | "Organization" )
 		    if [ -z "$MOREHEADERS" ]
 		    then
 			MOREHEADERS=$ATTACH
@@ -143,6 +182,9 @@ done
 
 # Send message
 ( echo "To: $TO";
+  if [ -n "$RECIPIENTS" ]; then
+      echo -e "$RECIPIENTS"
+  fi
   echo "Subject: $SUBJECT";
   if [ -n "$MOREHEADERS" ]; then
       echo -e "$MOREHEADERS"
