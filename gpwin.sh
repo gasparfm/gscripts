@@ -6,20 +6,22 @@ ZENITY=`which zenity`
 WINDOWID=
 NOTIFY_SEND=`which notify-send`
 NOTIFY_SEND_ARGS="-t 2000 -i window-duplicate"
-# First implementation. No locales. Spanish for now
+
+SCRIPT_SOURCE=`dirname $BASH_SOURCE[0]`
+. $SCRIPT_SOURCE/_gscripts_common.sh
 
 function already_stopped()
 {
     WINPID=$1
     NAME="$2"
 
-    $ZENITY --question --text "El proceso $2 está pausado. ¿Desea reanudarlo?" --title "Proceso pausado"
+    $ZENITY --question --text "$(__ "Process %s is paused. Do you wanto to resume it?" "$2")" --title "$(__ "Process paused")"
     RES=$?
     if [ "$RES" == "0" ]; then
 	kill -SIGCONT $WINPID
 	RES=$?
 	if [ "$RES" == "0" ]; then
-	    $NOTIFY_SEND $NOTIFY_SEND_ARGS "Se ha reanudado el proceso $NAME"
+	    $NOTIFY_SEND $NOTIFY_SEND_ARGS "$(__ "Process %s has been resumed" "$NAME")"
 	fi
     fi
 }
@@ -28,14 +30,14 @@ function already_running()
 {
     WINPID=$1
     NAME="$2"
-    PCPU=`ps ax -o pid,pcpu | grep $WINPID | awk '{print $2}'`
-    $ZENITY --question --text "El proceso $2 está corriendo y consumiendo "$PCPU"% de CPU. ¿Desea pausarlo?" --title "Proceso en curso"
+    PCPU="`ps ax -o pid,pcpu | grep $WINPID | awk '{print $2}'`"
+    $ZENITY --question --text "$(__ "Process %s is running and using %s%% CPU. Do you want to pause it?" "$NAME" "$PCPU")" --title "$(__ "Process running")"
     RES=$?
     if [ "$RES" == "0" ]; then
 	kill -SIGSTOP $WINPID
 	RES=$?
 	if [ "$RES" == "0" ]; then
-	    $NOTIFY_SEND $NOTIFY_SEND_ARGS "Se ha pausado el proceso $NAME"
+	    $NOTIFY_SEND $NOTIFY_SEND_ARGS "$(__ "Process %s has been paused" "$NAME")"
 	fi
     fi
 }
@@ -59,7 +61,7 @@ function get_window()
 	if [ "$1" == "Using" ]; then
 		WINDOWLIST="`$WMCTRL -l -p | grep $3`"
 		if [ -z "$WINDOWLIST" ]; then
-			$ZENITY --error --text "No se encuentra la ventana seleccionada"
+			$ZENITY --error --text "$(__ "Couldn't find selected window")"
 			exit
 		fi
 		WINPID=`echo "$WINDOWLIST" | awk '{print $3}'`
@@ -67,6 +69,6 @@ function get_window()
 	fi
 }
 
-$NOTIFY_SEND $NOTIFY_SEND_ARGS "Seleccione la ventana para ver el estado del proceso"
+$NOTIFY_SEND $NOTIFY_SEND_ARGS "$(__ "Please, click on a window to change its state")"
 $WMCTRL -a :SELECT: -v 2>&1 | while read line; do get_window $line; done
 
