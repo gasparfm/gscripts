@@ -1,0 +1,201 @@
+#!/bin/bash
+
+# Some things to do in the future
+#   Allow several servers, so we can distribute file conversions
+
+SCRIPT_SOURCE=`dirname $BASH_SOURCE[0]`
+SCRIPT_PID=$$
+. $SCRIPT_SOURCE/_gscripts_common.sh
+
+SELFNAME="$0"
+
+#RSYNC ... rsync -avhP --bwlimit=100K test/Synfig\ Animation\ * gaspy@localhost:test2 | awk "BEGIN { } { print \$1 \$2 \$3; fflush(); }";
+
+RSYNC_ARGS="--bwlimit=50K"
+# Use avconv, ffmpeg, maybe mencoder...
+CONVERTSOFTWARE=""
+
+# A file with the arguments for CONVERTSOFTWARE. Or them enclosed
+CONVERTARGUMENTS=""
+
+# Server to connect via SSH
+SERVER=""
+
+# Remote work directory
+REMOTEWORKDIRECTORY="/tmp"
+
+# Local final destination
+LOCALDESTINATION="`pwd`"
+
+# Destination file format
+FILEFORMAT="%name_converted.%ext"
+
+# Converted file extension
+EXTENSION="mp4"
+
+# Log file
+LOGFILE="%destination/videonetconvert.log"
+
+# Input files
+INPUTFILES=()
+
+function panic()
+{
+    echo "$1" 1>&2
+    kill -s TERM $SCRIPT_PID
+}
+
+function usage()
+{
+    echo "Usage: "
+    echo ""
+    echo "   $SELFNAME [options] file1 [file2 file3 ... fileN]"
+    echo ""
+    echo "Options:"
+    echo "  -program PROGRAMNAME : Program to use to convert file. You can use whether avconv or ffmpeg"
+    echo "  -args    PROGRAMARGUMENTS : Arguments for PROGRAMNAME to convert file. Maybe you can use templates"
+    echo "  -fileformat FORMAT : Format to use for destination file. Default \"%name_converted.%ext\""
+    echo "     You can use keywords for dynamic name creation, valid keywords are:"
+    echo "       * %name : Use the original file name (without extension)"
+    echo "       * %ext  : Final extension"
+    echo "  -extension EXTENSION : Extension for converted file. Default mp4"
+    echo "  -server  SERVER : Server to use for computation. e.g.: user@myhost"
+    echo "           SERVER MUST use public/private keys to authenticate with no password"
+    echo "  -workdir REMOTEWORKDIR : Remote work directory. Work directory in our SERVER. Defaults to /tmp"
+    echo "  -destination DESTINATION : Local directory where to copy final files. Defaults to local dir (pwd)"
+    echo "  -logfile LOGFILE : Log file. Default \"%destination/videonetconvert.log\""
+    echo "     You can use keywords here too:"
+    echo "       * %destination : DESTINATION (see -destination)"
+    echo ""
+    echo " More information: http://gaspar.totaki.com/"
+    kill -s TERM $SCRIPT_PID
+}
+
+# Searches for a valid substring inside a big string
+function searchValid()
+{
+    NEEDLE="$1"
+    HAYSTACK="$2"
+
+    for i in $HAYSTACK
+    do
+	if [ "$i" == "$NEEDLE" ]
+	then
+	    echo "found"
+	    return;
+	fi
+    done
+}
+
+function checkArguments()
+{
+    if [ -z "$SERVER" ]
+    then
+	echo "No server to work with."
+	usage
+    fi
+}
+
+function checkSoftware()
+{
+    VALIDSW="avconv ffmpeg"
+    SW="`execssh "which avconv; which ffmpeg; which rsync"`"
+    echo $SW > /tmp/mylo
+    if [ -z "$CONVERTSOFTWARE" ]
+    then
+	if [ -n "`echo $SW | grep avconv`" ]
+	then
+	    $CONVERTSOFTWARE="avconv"
+	elif [ -n "`echo $SW | grep ffmpeg`" ]
+	then
+	    $CONVERTSOFTWARE="ffmpeg"
+	else
+	    panic "Failed to search conversion software in remote server"
+	fi
+    else
+	if [ -z `searchValid "$CONVERTSOFTWARE" "$VALIDSW"` ]
+	then
+	    panic "Given conversion software "$CONVERTSOFTWARE" is not valid. Please use ffmpeg or avconv"
+	fi
+
+	if [ -z "`echo $SW | grep $CONVERTSOFTWARE`" ]
+	then
+	    panic "Conversion software $CONVERTSOFTWARE not found in remote server"
+	fi
+    fi
+
+    if [ -z "`echo $SW | grep rsync`" ]
+    then
+	panic "rsync not found. Couldn't copy media files"
+    fi
+}
+
+function execssh()
+{
+    ssh $SERVER 'bash -s' <<EOF
+#!/bin/bash
+$1
+EOF
+    RES=$? 
+    if [ !$ RES -eq 0 ]
+    then
+	panic "There was a problem connecting to the remote server"
+    fi
+}
+
+function doConvert()
+{
+    # File copy to server will be 30%
+    echo "# Copying files to server..."
+    rsync ${INPUTFILES[@]} 
+
+
+}
+
+while [ $# -ne 0 ]
+do
+    arg="$1"
+    case "$arg" in
+	-program)
+	    CONVERTSOFTWARE="$2"
+	    shift
+	    ;;
+	-args)
+	    CONVERTARGUMENTS="$2"
+	    shift
+	    ;;
+	-server)
+	    SERVER="$2"
+	    shift
+	    ;;
+	-workdir)
+	    REMOTEWORKDIRECTORY="$2"
+	    shift
+	    ;;
+	-destination)
+	    LOCALDESTINATION="$2"
+	    shift
+	    ;;
+	*)
+	    INPUTFILES+=("$arg")
+	    ;;
+    esac
+    shift
+done
+
+trap "exit 1" TERM
+checkArguments
+checkSoftware
+
+echo Software:"$CONVERTSOFTWARE"
+echo Arguments:"$CONVERTARGUMENTS"
+echo Server: "$SERVER"
+echo Remote work directory: "$REMOTEWORKDIRECTORY"
+echo Local Final Destination: "$LOCALDESTINATION"
+echo Files: 
+for i in ${INPUTFILES[@]}
+do
+    echo "   $i"
+done
+
+doConvert | zenity --progress --title "Video Network Converter" --width=320
