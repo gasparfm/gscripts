@@ -1,0 +1,94 @@
+#!/bin/bash
+#
+# Author: Gaspar Fernandez (blakeyed@totaki.com)
+# Extracted from http://totaki.com/poesiabinaria
+#
+# Do whatever you want with this code.
+
+function panic()
+{
+    echo "$1" 1>&2
+    exit 1
+}
+
+function checkSoftware()
+{
+    SW="`which avconv; which ffmpeg`"
+
+    if [ -n "`echo $SW | grep avconv`" ]
+    then
+	CONVERTSOFTWARE="avconv"
+    elif [ -n "`echo $SW | grep ffmpeg`" ]
+    then
+	CONVERTSOFTWARE="ffmpeg"
+    else
+	panic "Failed to search conversion software in remote server"
+    fi
+}
+
+function getVideoInfo()
+{
+    $CONVERTSOFTWARE -i "$1" 2>&1
+}
+
+function getAllData()
+{
+    FILE="$1"
+    if [ ! -r "$FILE" ]
+    then
+	panic "File $FILE not found"
+    fi
+    FILEINFO="`getVideoInfo "$FILE"`"
+    DURATION=$(echo "$FILEINFO" | sed -n "s/.* Duration: \([^,]*\), start: .*/\1/p")
+    BITRATE=$(echo "$FILEINFO" | sed -n "s/.* bitrate: \([^,]*\) kb\/s/\1/p")
+    FPS=$(echo "$FILEINFO" | sed -n "s/.*, \(.*\) fps.*/\1/p")
+    FRAMES=$(echo $DURATION | awk -F':' "{ FRAMES=(\$1*3600+\$2*60+\$3)*$FPS; print FRAMES }")
+}
+
+checkSoftware
+
+if [ -z "$1" ]
+then
+    panic "No input file"
+fi
+
+if [ -z "$2" ]
+then
+    FILE="$1"
+    DATA="all"
+else
+    FILE="$2"
+    DATA="$1"
+fi
+
+case "$DATA" in
+    "all") 
+	getAllData "$FILE"
+	echo "Duration: $DURATION"
+	echo "FPS: $FPS"
+	echo "Bitrate: $BITRATE kb/s"
+	echo "Total frames: $FRAMES"
+	;;
+    "duration")
+	getAllData "$FILE"
+	echo "$DURATION"
+	;;
+    "seconds")
+	getAllData "$FILE"
+	SECS=$(($FRAMES%$FPS+$(($FRAMES%$FPS!=0))))
+	;;
+    "fps")
+	getAllData "$FILE"
+	echo "$FPS"
+	;;
+    "bitrate")
+	getAllData "$FILE"
+	echo "$BITRATE"
+	;;
+    "frames")
+	getAllData "$FILE"
+	echo "$FRAMES"
+	;;
+    *)
+	panic "Element to extract not recognized: $DATA"
+esac
