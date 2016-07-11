@@ -76,6 +76,7 @@ case "$DATA" in
     "seconds")
 	getAllData "$FILE"
 	SECS=$(($FRAMES%$FPS+$(($FRAMES%$FPS!=0))))
+	echo $SECS
 	;;
     "fps")
 	getAllData "$FILE"
