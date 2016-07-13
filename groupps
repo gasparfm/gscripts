@@ -1,0 +1,67 @@
+#!/bin/bash
+
+GROUP_ARG=$1
+HUMAN=0
+case $GROUP_ARG in
+     "rss")
+	GROUPABLE="rss"
+	HUMAN=1
+	;;
+     "size")
+	GROUPABLE="size"
+	HUMAN=1
+	;;
+     "pmem")
+	GROUPABLE="pmem"
+	HUMAN=0
+	;;
+     "pcpu")
+	GROUPABLE="pcpu"
+	HUMAN=0
+	;;
+     *)
+	echo "Bad argument!"
+	exit
+esac
+
+ps -axo pid,$GROUPABLE,cmd | awk '
+function human(x) {
+         s="KiB MiB GiB TiB EiB PiB"
+         while (x>=1024 && length(s)>1) 
+               {
+		       x/=1024; 
+		       s=substr(s,5)
+	       }
+         s=substr(s,0,3)
+         return sprintf( "%.2f%s", x, s)
+}
+BEGIN {
+	i=0
+}
+{
+	if (!procesos[$3])
+	{
+		procesos[$3]=i
+		pids[i]=$1 ""
+		group[i]=$2
+		i++
+
+	}
+	else
+	{
+		n = procesos[$3]
+		pids[n]=pids[n] ", " $1 ""
+		group[n]+=$2
+	}
+}
+END {
+	for (p in procesos)
+	{
+		i = procesos[p];
+                if ('$HUMAN')
+	        	printf "%s %s (%s)\n", p, human(group[i]), pids[i]
+		else
+	        	printf "%s %s (%s)\n", p, group[i], pids[i]
+	}
+}
+';
