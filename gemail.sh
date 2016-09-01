@@ -25,6 +25,10 @@
 # the destination.
 
 # Changelog:
+# - 20160901: Fix selecting SMTP user
+#             Fix when sending mails through cron jobs (again) this time,
+#             when sending from scripts ran in cron jobs. /dev/stdin is
+#             present in some conditions but with no data.
 # - 20160706: Several new CLI options.
 # - 20160705: Added SMTP support with tiny python script
 # - 20160703: Fixes adding headers and autoheaders
@@ -287,7 +291,7 @@ function smtp_settings()
         read server
         break
     done <<< $(sed -r 's/([^\:\@]*(\\:[^\:\@]*)*):([^\@]*(\\@[^\:\@]*)*)@([^\/\:]*)/\1\n\3\n\5/' <<< "$STS");
-    if [ -z "$USER" ]
+    if [ -z "$user" ]
     then
 	showUsage "Wrong SMTP server string: \"$STS\""
     fi
@@ -393,10 +397,15 @@ then
 fi
 
 # If we have data in /dev/stdin pick up the email body from /dev/stdin
+# -t 0 : make sure stdin (fd=0) is not a terminal as this program is not
+# interactive
 if [ -r /dev/stdin ] && [ ! -t 0 ]
 then
     BODY=$(cat /dev/stdin)
-elif [ -n "$1" ] && [ -z "$BODY" ]
+fi
+# If we have no body yet, test the argument. In cron jobs /dev/stdin may
+# be detected with no data.
+if [ -n "$1" ] && [ -z "$BODY" ]
 then
     BODY="$1"
     shift
