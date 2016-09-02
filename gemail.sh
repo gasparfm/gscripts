@@ -25,10 +25,12 @@
 # the destination.
 
 # Changelog:
+# - 20160902: Fixed bad python indentation (after yesterday's re-indentation)
 # - 20160901: Fix selecting SMTP user
 #             Fix when sending mails through cron jobs (again) this time,
 #             when sending from scripts ran in cron jobs. /dev/stdin is
 #             present in some conditions but with no data.
+#             Indentation fix
 # - 20160706: Several new CLI options.
 # - 20160705: Added SMTP support with tiny python script
 # - 20160703: Fixes adding headers and autoheaders
@@ -133,9 +135,9 @@ function test_py()
 
 	python <<EOF
 try:
-import smtplib
+	import smtplib
 except ImportError as er:
-print er
+		print er
 EOF
 }
 
@@ -149,19 +151,19 @@ function pysmtp()
 import smtplib
 import sys
 try:
- smtpObj = smtplib.SMTP('$SMTP_SERVER')
- if ('$SMTP_SECURITY' == 'starttls'):
-   smtpObj.starttls()
- if ('$SMTP_USER'):
-   smtpObj.login('$SMTP_USER', '$SMTP_PASS')
- message = sys.stdin.read()
- _from = message.find('From:')
- fromstr = 'root'
- if _from != -1:
-   fromstr = message[_from+5:message.find('\n', _from)]
- smtpObj.sendmail(fromstr.strip(), '$_TO', message)
+	smtpObj = smtplib.SMTP('$SMTP_SERVER')
+	if ('$SMTP_SECURITY' == 'starttls'):
+		smtpObj.starttls()
+	if ('$SMTP_USER'):
+		smtpObj.login('$SMTP_USER', '$SMTP_PASS')
+	message = sys.stdin.read()
+	_from = message.find('From:')
+	fromstr = 'root'
+	if _from != -1:
+		fromstr = message[_from+5:message.find('\n', _from)]
+	smtpObj.sendmail(fromstr.strip(), '$_TO', message)
 except Exception as e:
- print e
+	print e
 EOF
 	)
 }
