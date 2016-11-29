@@ -8,9 +8,9 @@ DOMAIN="gscripts"
 #   * $SCRIPT_SOURCE/gscripts/locale
 if [ -z "`ls -R /usr/share/locale | grep $DOMAIN.mo`" ]; then
     if [ -n "`ls -R $SCRIPT_SOURCE/gscripts/locale | grep $DOMAIN.mo`" ]; then
-	TEXTDOMAINDIR=$SCRIPT_SOURCE/gscripts/locale
+	export TEXTDOMAINDIR="$SCRIPT_SOURCE/gscripts/locale/"
     else
-	TEXTDOMAINDIR=$SCRIPT_SOURCE/locale
+	export TEXTDOMAINDIR="$SCRIPT_SOURCE/locale/"
     fi
 fi
 
