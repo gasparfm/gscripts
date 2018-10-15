@@ -1,0 +1,968 @@
+#!/bin/bash
+
+# To-do
+# Temporary configuration. Para delay y texto de comentarios del archivo. El archivo de configuracion temporal solo
+# Estara vigente durante un tiempo (CONFIGURABLE)
+
+# do_capture: separar en varias funciones
+readonly VERSION="0.5"
+readonly LOCKFILE="/tmp/gscreenshot_"$(whoami)"_"$(echo $DISPLAY | tr ':' '_')
+readonly SCRIPTPATH="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
+readonly DEBUG=1
+LOCKFD=150
+readonly MYPID="$$"
+readonly MYNAME="$(basename "$0")"
+MAIM_EXE=
+CONVERT_EXE=
+IDENTIFY_EXE=
+MOGRIFY_EXE=
+NOTIFY_EXE=
+RECENTS_EXE=
+ZENITY_EXE=
+PYTHON_EXE=
+PYTHON_GTK=
+ZBAR_EXE=
+declare -A DEFAULTCONFIG
+DEFAULTCONFIG=(["_default_FILENAME_PATTERN"]="%HOME%/Screenshot_%DATETIME%.png"
+							 ["_default_CAPTUREDIR"]="Captures"
+							 ["_default_DATETIME_FORMAT"]="%Y-%m-%d-%H%M%S"
+							 ["_default_DATE_FORMAT"]="%Y-%m-%d"
+							 ["_default_TIME_FORMAT"]="%H%M%S"
+							 ["_default_INCLUDE_CURSOR"]="no"
+							 ["_default_BORDER_WIDTH"]=2
+							 ["_default_BORDER_COLOR"]="1,0,0,0.8"
+							 ["_default_OTHER_OPTIONS"]=
+							 ["_default_DEFAULT_DELAY_SECS"]=
+							 ["_default_NOTIFY_GLYPH"]=
+							 ["_default_NOTIFY_BEOFORE"]=yes
+							 ["_default_NOTIFY_AFTER"]=yes
+							 ["_default_NOTIFY_BEFORE_DELAY"]=1000
+							 ["_default_NOTIFY_AFTER_DELAY"]=2000
+							 )
+readonly DEFAULTCONFIG
+WRED='\033[0;31m'
+WGREEN='\033[0;32m'
+WMAGENTA='\033[0;35m'
+WNC='\033[0m' # No Color
+
+GREENOK="${WGREEN}Ok${WNC}"
+REDERR="${WRED}Error${WNC}"
+
+function util_filename()
+{
+  local FILE="$1"
+  FILE="${FILE##*/}"
+  [[ "$2" ]] && echo "${FILE%.*}" || echo "${FILE%%.*}"
+}
+
+function util_fextension()
+{
+  local FILE="$1"
+  FILE="${FILE##*/}"
+
+  [[ "$FILE" = *.* ]] && ( [[ "$2" = "1" ]] && echo "${FILE#*.}" || echo "${FILE##*.}")
+}
+
+function util_dirname()
+{
+  local PATH="$1"
+
+  [[ "$PATH" = */* ]] && echo "${PATH%/*}"
+}
+
+function show_version() {
+		echo "Script para hacer capturas de pantalla. gscreenshot. Version $VERSION"
+		echo "Por Gaspar Fernández <gaspy@totaki.com>"
+		echo "https://gaspar.totaki.com/gscreenshot/"
+}
+
+function _debug() {
+		if [ "$DEBUG" ]; then
+				echo -e "${WMAGENTA}  DEBUG: $@${WNC}" >&2
+		fi
+}
+
+function _error() {
+		echo -e "${WRED} ERROR: $@${WNC}" >&2
+}
+
+function extract_delimiters() {
+		local ORIGINAL="$1"
+		local LEFT="$2"
+		local RIGHT="$([ -n "$3" ] && echo "$3" || echo "$2")"
+
+		RES=${ORIGINAL#*${LEFT}};
+		RES=${RES%${RIGHT}*}
+
+		echo "$RES"
+}
+
+function extract_delimiters_c() {
+		local ORIGINAL="$1"
+		local LEFT="$2"
+		local RIGHT="$3"
+
+		if [[ ${ORIGINAL:0:1} == "$LEFT" ]]; then
+				extract_delimiters "$ORIGINAL" "$LEFT" "$RIGHT"
+		else
+				echo "$ORIGINAL"
+		fi
+}
+
+function help() {
+		show_version
+
+		echo
+		echo "Sintaxis:"
+		echo "   gscreenshot [opciones]"
+		echo
+		echo " Las opciones son las siguientes:"
+		echo " --type=xx, -t xx : Indica el tipo de captura a realizar:"
+		echo "     screen   : Captura la pantalla completa."
+		echo "     window   : Captura la ventana activa."
+		echo "     user     : Crea una captura interactiva."
+		echo " --check, -c      : Comprueba las dependencias."
+		echo " --preview, -p    : Previsualiza la captura con el programa seleccionado"
+		echo " --help, -h       : Presenta esta pantalla de ayuda."
+		echo " --version, -v    : Versión del programa."
+		echo
+}
+
+function panic() {
+		local ERRSTR="$2"
+		local ERRCODE="$1"
+
+		echo "Error: $ERRSTR ($ERRCODE)"
+		# Errors:
+		# From 1 to 10: initialization errors
+		# From 10 to 50: capture errors
+		# From 50 to 100: GUI errors
+		# From 100 to infinity: user errors
+		if [ $ERRCODE -gt 100 ]; then
+				help
+		elif [ $ERRCODE -gt 50 ]; then
+				gui_error "$ERRSTR"
+		elif [ $ERRCODE -ge 10 ]; then
+				launch_event "ON_ERROR" "" "" "" "$ERRSTR"
+		fi
+		exit $ERRCODE
+}
+
+function gui_error() {
+		$ZENITY_EXE --error --title="Error en gscreenshot" --text "$@"
+}
+
+function gui_progress() {
+		local TEXT="$1"
+
+		$ZENITY_EXE --progress --title="gscreenshot" --text="$TEXT" --auto-close --time-remaining
+}
+
+function launch_event() {
+		local EVENT_NAME="$1"
+		shift
+		local EVENT="$(get_setting "$EVENT_NAME")"
+		if [ "$EVENT" ]; then
+				EVENT=$(generate_command "$EVENT" "$1" "$2" "$3" "$4")
+				_debug $EVENT
+				env sh -s <<< ${EVENT}
+		fi
+}
+
+function check_dependencies() {
+		MAIM_EXE=$(which maim)
+		IDENTIFY_EXE=$(which identify)
+		CONVERT_EXE=$(which convert)
+		MOGRIFY_EXE=$(which mogrify)
+		NOTIFY_EXE=$(which notify-send)
+		RECENTS_EXE=$(which recents)
+		ZENITY_EXE=$(which zenity)
+		PYTHON_EXE=$(which python)
+		ZBAR_EXE=$(which zbarimg)
+		# If no input parameters panic mode when some program is not found
+		local PANICMODE=false
+		if [ -z "$1" ]; then PANICMODE=true; fi
+
+		if [ ! -r "$MAIM_EXE" ]; then
+				if $PANICMODE; then panic 5 "No se cumplen las dependencias. Falta maim"; fi
+		fi
+
+		if [ ! -r "$CONVERT_EXE" ]; then
+				if $PANICMODE; then panic 5 "No se cumplen las dependencias. Falta ImageMagick"; fi
+		fi
+
+		if [ ! -r "$MOGRIFY_EXE" ]; then
+				if $PANICMODE; then panic 5 "No se cumplen las dependencias. Falta ImageMagick"; fi
+		fi
+
+		if [ ! -r "$IDENTIFY_EXE" ]; then
+				if $PANICMODE; then panic 5 "No se cumplen las dependencias. Falta ImageMagick"; fi
+		fi
+
+		if [ ! -r "$NOTIFY_EXE" ]; then
+				if $PANICMODE; then panic 5 "No se cumplen las dependencias. Falta notify_send"; fi
+		fi
+
+		if [ ! -r "$RECENTS_EXE" ]; then
+				# No panic with no recents
+				# if "$PANICMODE"; then panic 5 "No se cumplen las dependencias. Falta recents"; fi
+				true
+		fi
+
+		if [ ! -r "$ZENITY_EXE" ]; then
+				if $PANICMODE; then panic 5 "No se cumplen las dependencias. Falta zenity"; fi
+		fi
+
+		if [ ! -r "$ZBAR_EXE" ]; then
+				# No panic for zbar
+				# if $PANICMODE; then panic 5 "No se cumplen las dependencias. Falta zbar"; fi
+				true
+		fi
+
+		if [ ! -r "$PYTHON_EXE" ]; then
+				# No panic with no python
+				# if $PANICMODE; then panic 5 "No se cumplen las dependencias. Falta python"; fi
+				true
+		else
+				PYTHON_GTK=$($PYTHON_EXE <<EOF
+try:
+	import gi
+	gi.require_version('Gtk', '3.0')
+	from gi.repository import Gtk
+	print('1')
+except ImportError as er:
+	print('ERROR')
+EOF
+										 )
+		fi
+}
+
+function check_sc_tpe() {
+		local TYPE=$1
+		local _VALID_TYPES=("screen" "window" "user")
+
+		if printf '%s\0' "${_VALID_TYPES[@]}" | grep -Fqxz "$TYPE"; then
+				echo "ok"
+				return 0;
+		else
+				return 1;
+		fi
+}
+
+function lock() {
+		local PID="$(cat $LOCKFILE)"
+		echo {LOCKFD}<>$LOCKFILE
+
+		flock -n $LOCKFD
+		local STATUS=$?
+		if [ $STATUS = 0 ]; then
+				# Escribimos nuestra PID
+				echo $MYPID >&${LOCKFD}
+				return 0
+		else
+				local PROCNAME="$(cat /proc/$PID/comm 2>/dev/null)"
+				if [ "$PROCNAME" != "$MYNAME" ]; then
+						echo "Error, el proceso ejecutado no coincide con el que debe"
+						exit 1
+				fi
+				local FROMTIME=$(awk -v ticks="$(getconf CLK_TCK)" -v epoch="$(date +%s)" '
+  						NR==1 { now=$1; next }
+  						END { printf "%9.0f", epoch - (now-($20/ticks)) }' /proc/uptime RS=')' /proc/$PID/stat | xargs -i date +"%d/%m/%Y %H:%M:%S" -d @{})
+				echo "El proceso $PID ($PROCNAME) lleva abierto desde $FROMTIME"
+
+				return 1
+		fi
+}
+
+function exit_error() {
+				echo "Ya hay una instancia en ejecución. Saliendo"
+				exit 1
+}
+
+function read_ini_file() {
+    shopt -p extglob &> /dev/null
+
+    local CHANGE_EXTGLOB=$?
+    if [ $CHANGE_EXTGLOB = 1 ]; then
+        shopt -s extglob
+    fi
+		local CONFIG=
+		declare -A CONFIG
+    local FILE="$1"
+    # Nombre por defecto cuando no hay sección
+    local CURRENT_SECTION="_default"
+
+    local ini="$(<$FILE)"
+
+    # Quitamos los \r usados en la nueva línea en formato DOS
+    ini=${ini//$'\r'/}
+    # Convertimos a un array
+    IFS=$'\n' && ini=(${ini})
+    # Borra espacios al principio y al final (trim)
+    ini=(${ini[*]/#+([[:space:]])/})
+    ini=(${ini[*]/%+([[:space:]])/})
+    # Borra comentarios, con ; y con #
+    ini=(${ini[*]//;*/})
+    ini=(${ini[*]//\#*/})
+
+    for l in ${ini[*]}; do
+        if [[ "$l" =~ ^\[(.*)\]$ ]]; then
+            CURRENT_SECTION="${BASH_REMATCH[1]}"
+        elif [[ "$l" =~ ^(.*)=\"(.*)\" ]] || [[ "$l" =~ ^([^=]*)=(.*) ]]; then
+            local KEY="${CURRENT_SECTION}_"${BASH_REMATCH[1]%%+([[:space:]])}
+            local VALUE=${BASH_REMATCH[2]##+([[:space:]])}
+            CONFIG[$KEY]="$VALUE"
+        else
+            false
+        fi
+    done
+
+    if [ $CHANGE_EXTGLOB = 1 ]; then
+        shopt -u extglob
+    fi
+
+		# CONFIG is now global
+		local _CONFIG=$(declare -p CONFIG)
+		# declare -p CONFIG >&2
+		# Extracting only the interesting part (to avoid using eval)
+		_CONFIG="$(extract_delimiters "$_CONFIG" "'")"
+		# Undo escaping
+		_CONFIG=${_CONFIG//\'\\\'\'/\'}
+		echo $_CONFIG
+		#declare -p _CONFIG
+		#readonly CONFIG
+
+}
+
+function get_config_file() {
+		local locations=("$HOME/.gscreenshot" "$HOME/.local/etc/gscreenshot" "/etc/gscreenshot" ".gscreenshot")
+		for loc in ${locations[@]}; do
+				if [ -r "$loc" ]; then
+						echo "$loc"
+						return
+				fi
+		done
+}
+
+function read_config() {
+		local CFGFILE="$(get_config_file)"
+		if [ -z "$CFGFILE" ]; then
+				return 1
+		fi
+		read_ini_file "$CFGFILE"
+		return 0
+}
+
+function get_formatted_date() {
+		local FORMAT="$1"
+		local NOCACHE="$2"					# If empty, use current DATE/TIME
+
+		if [ -z "$NOCACHE" ] && [ ! "$_CACHED_DATE" ]; then
+				_CACHED_DATE="$(date "+%s")"
+		fi
+		if [ -n "$FORMAT" ]; then
+				[ -z "$NOCACHE" ] && date --date="@$_CACHED_DATE" +"$FORMAT" || date +"$FORMAT"
+		fi
+}
+
+function get_setting() {
+		local SETTING="$1"
+		local NAMESPACE=$([ $2 ] && echo "$2" || echo "_default")
+		local FILTER="$3"
+		local VAL
+
+		# _debug "$SETTING - ${MAINCONFIG[${NAMESPACE}_${SETTING}]} - ${DEFAULTCONFIG[${NAMESPACE}_${SETTING}]}"
+		if [ "${MAINCONFIG[${NAMESPACE}_${SETTING}]}" ]; then
+				VAL="$(extract_delimiters_c "${MAINCONFIG[${NAMESPACE}_${SETTING}]}" '"')"
+		else
+				VAL="${DEFAULTCONFIG[${NAMESPACE}_${SETTING}]}"
+		fi
+
+		case "$FILTER" in
+				"number")
+						# If it's not a number, back to the default value
+						! [[ "$VAL" =~ ^[0-9]+$ ]] && (
+								_error "La configuración $SETTING debe ser numérica. (Valor actual: $VAL)"
+								VAL="${DEFAULTCONFIG[${NAMESPACE}_${SETTING}]}"
+								)
+						;;
+				*)
+						;;
+		esac
+		echo "$VAL"
+}
+
+function get_boolean() {
+		local ARG="$1"
+
+		case "${ARG,,}" in
+				"yes"|"true"|"1"|"si"|"y"|"s")
+						echo true
+						;;
+				*)
+						;;
+		esac
+}
+
+function generate_filename() {
+		local FILENAME="$1"
+		local RECURSIVE="$2"				# When calling in a recursive way we may not want some replacements filled
+		local REPLACEMENTS
+
+		# TODO. We could make it global someway to improve speed
+		declare -A REPLACEMENTS=(["HOME"]="$HOME"
+														 ["CAPTUREDIR"]="$([[ "$RECURSIVE" =~ '/CAPTUREDIR' ]] || generate_filename "$(get_setting CAPTUREDIR)" "$RECURSIVE/CAPTUREDIR" )"
+														 ["THUMBNAILDIR"]="$([[ "$RECURSIVE" =~ '/THUMBNAILDIR' ]] || (generate_filename "$(get_setting THUMBNAILDIR)" "$RECURSIVE/THUMBNAILDIR") )"
+														 ["SCRIPTDIR"]="$SCRIPTPATH"
+														 ["DATETIME"]="$(get_formatted_date "$(get_setting DATETIME_FORMAT)")"
+														 ["DATE"]="$(get_formatted_date "$(get_setting DATE_FORMAT)")"
+														 ["TIME"]="$(get_formatted_date "$(get_setting TIME_FORMAT)")"
+														)
+
+		for KEY in "${!REPLACEMENTS[@]}"; do
+				VALUE=${REPLACEMENTS["$KEY"]}
+				FILENAME=${FILENAME//"%$KEY%"/"$VALUE"}
+		done
+
+		echo "$FILENAME"
+}
+
+function generate_metadata() {
+		local RAW="$1"
+		local RECURSIVE="$2"				# When calling in a recursive way we may not want some replacements filled
+		local MDREPS
+
+		# TODO. We could make it global someway to improve speed
+		declare -A MDREPS=(["YEAR"]="$(get_formatted_date "%Y")"
+											 ["USERNAME"]="$(whoami)"
+											 ["DATETIME"]="$(get_formatted_date "$(get_setting DATETIME_FORMAT)")"
+											 ["DATE"]="$(get_formatted_date "$(get_setting DATE_FORMAT)")"
+											 ["TIME"]="$(get_formatted_date "$(get_setting TIME_FORMAT)")"
+											)
+
+		for KEY in "${!MDREPS[@]}"; do
+				VALUE=${MDREPS["$KEY"]}
+				RAW=${RAW//"%$KEY%"/"\"$VALUE\""}
+		done
+
+		echo "$RAW"
+}
+
+function generate_command() {
+		local RAW="$1"
+		local TYPE="$2"
+		local FILENAME="$3"
+		local DELAY="$4"
+		local MSG="$5"
+
+		local MDREPS
+
+		declare -A MDREPS=(["TYPE"]="$TYPE"
+											 ["FILENAME"]="$FILENAME"
+											 ["DELAY"]="$DELAY"
+											 ["MSG"]="$MSG"
+											)
+
+		for KEY in "${!MDREPS[@]}"; do
+				VALUE=${MDREPS["$KEY"]}
+				RAW=${RAW//"%$KEY%"/"\"$VALUE\""}
+		done
+
+		echo "$RAW"
+}
+
+function show_notification() {
+		local TITLE="$1"
+		local CONTENT="$2"
+		local DELAY="$3"
+		local EXTRA="$4"						# More configuration for notifications
+		local GLYPH="$(get_setting NOTIFY_GLYPH)"
+		local NOTIFY_ARGS=()
+
+		if [ "$GLYPH" ]; then
+				NOTIFY_ARGS+=("-i" "$(generate_filename "$GLYPH")")
+		fi
+		if [ "$DELAY" ]; then
+				NOTIFY_ARGS+=("-t" "$DELAY")
+		fi
+
+		NOTIFY_ARGS+=("$TITLE" "$CONTENT")
+		_debug "${NOTIFY_ARGS[@]}"
+		$NOTIFY_EXE "${NOTIFY_ARGS[@]}"
+}
+
+function do_capture() {
+		local TYPE="$1"
+
+#		_debug ${MAINCONFIG[@}]
+		local FILENAME="$(generate_filename "$(get_setting FILENAME_PATTERN)")"
+		local MAIM_ARGS=()
+
+		case "$TYPE" in
+				"window")
+						MAIM_ARGS+=("-i $(xdotool getactivewindow)")
+						;;
+				"user")
+						MAIM_ARGS+=("-s")
+						local BORDERCOLOR="$(get_setting BORDER_COLOR)"
+						local BORDERWIDTH="$(get_setting BORDER_WIDTH)"
+						if [ "$BORDERCOLOR" ]; then
+								MAIM_ARGS+=("-c" "$BORDERCOLOR")
+						fi
+						if [ "$BORDERWIDTH" ]; then
+								MAIM_ARGS+=("-b" "$BORDERWIDTH")
+						fi
+						;;
+				"screen")
+						;;
+				*)
+						;;
+		esac
+
+		lock || show_notification "Captura de pantalla" "El proceso de captura está bloqueado. Ya hay una captura en curso"
+
+		if [ "$(get_boolean "$(get_setting INCLUDE_CURSOR)")" ]; then
+				MAIM_ARGS+=("--showcursor")
+		fi
+
+		DELAY=$(get_setting DEFAULT_DELAY_SECS)
+		if [ "$DELAY" ]; then
+				MAIM_ARGS+=("-d $DELAY")
+		fi
+		#echo ${MAINCONFIG[@]}
+
+		MAIM_ARGS+=($(get_setting OTHER_OPTIONS))
+		MAIM_ARGS+=("$FILENAME")
+
+		[ "$(get_boolean "$(get_setting NOTIFY_BEFORE)")" ] && show_notification "Captura de pantalla" "Seleccione el área a capturar" "$(get_setting NOTIFY_BEFORE_DELAY)"
+
+		launch_event "ON_BEFORE_CAPTURE" "$TYPE" "$FILENAME" "$DELAY"
+		$MAIM_EXE "${MAIM_ARGS[@]}"
+
+		if [ "$?" -ne "0" ];
+    then
+				[ "$(get_boolean "$(get_setting NOTIFY_AFTER)")" ] && show_notification "Error" "Fallo al capturar" "$(get_setting NOTIFY_AFTER_DELAY)"
+				panic 10 "No se ha realizado la captura"
+    else
+				[ "$(get_boolean "$(get_setting NOTIFY_AFTER)")" ] && show_notification "Muy bien" "Captura realizada con éxito" "$(get_setting NOTIFY_AFTER_DELAY)"
+    fi
+
+		launch_event "ON_AFTER_CAPTURE" "$TYPE" "$FILENAME" "$DELAY"
+
+		if [ ! -r "$FILENAME" ]; then
+				# No deberíamos NUNCA estar aquí. Pero, siempre pueden pasar cosas raras.
+				panic 11 "El archivo de captura no existe"
+		fi
+		local COMMENT="$(get_setting APPEND_COMMENT)"
+		if [ "$COMMENT" ]; then
+				COMMENT="$(generate_metadata "$COMMENT")"
+				$MOGRIFY_EXE -comment "$COMMENT" "$FILENAME"
+		fi
+
+		[ "$(get_boolean "$(get_setting USE_RECENTS)")" ] && recents -qa "$FILENAME"
+
+		if [ "$(get_boolean "$(get_setting MAKE_THUMBNAIL)")" ]; then
+				local _MIN_WIDTH="$(get_setting MIN_IMAGE_WIDTH "" number)"
+				local _MIN_HEIGHT="$(get_setting MIN_IMAGE_HEIGHT "" number)"
+				if [ -n "$(identify -format "%w %h" "$FILENAME" | awk "{ if (\$1 >$_MIN_WIDTH && \$2 > $_MIN_HEIGHT) print \"true\"}")" ]; then
+						local THUMB_FILE="$(generate_filename "$(get_setting THUMBNAIL_PATTERN)")"
+						local DIRECTORY="$(dirname "$THUMB_FILE")"
+						[ -d "$DIRECTORY" ] || mkdir -p "$DIRECTORY"
+
+						local THCOMMENT="$(get_setting APPEND_COMMENT_THUMBNAILS)"
+						if [ "$THCOMMENT" ]; then
+								THCOMMENT="$(generate_metadata "$THCOMMENT")"
+								convert "$FILENAME" -comment "$THCOMMENT" -resize "$(get_setting THUMBNAIL_SIZE)" "$THUMB_FILE"
+						else
+								convert "$FILENAME" -resize "$(get_setting THUMBNAIL_SIZE)" "$THUMB_FILE"
+						fi
+						launch_event "ON_CREATE_THUMBNAIL" "$TYPE" "$THUMB_FILE" "$DELAY" "$FILENAME"
+				fi
+		fi
+
+		local SUMMARYFILE="$(generate_filename "$(get_setting SUMMARY_FILE)")"
+		if [ "$SUMMARYFILE" ]; then
+				[ -d "$(dirname "$SUMMARYFILE")" ] || mkdir -p "$SUMMARYFILE"
+				touch "$SUMMARYFILE"
+				[ -r "$SUMMARYFILE" ] || _error "Cannot access Summary File: $SUMMARYFILE"
+				local LASTSHOTS="$(head -n $(($(get_setting MAX_ENTRIES number)-1)) "$SUMMARYFILE")"
+				echo -e "$FILENAME\n$LASTSHOTS" > $SUMMARYFILE
+		fi
+}
+
+function summary_file() {
+		local _SUMMARYFILE="$(get_setting SUMMARY_FILE)"
+		[ "$_SUMMARYFILE" ] || panic 56 "No hay fichero de registro de capturas"
+		local SUMMARYFILE="$(generate_filename "$_SUMMARYFILE")"
+		echo "$SUMMARYFILE"
+}
+
+function do_preview() {
+		local SUMMARYFILE="$(summary_file)"
+		local EXTERNALPREVIEW="$(get_setting PROGRAM_EXTERNAL_PREVIEW)"
+
+		[ -n "$EXTERNALPREVIEW" ] || panic 53 "No se ha especificado el programa para previsualizar"
+		[ -r "$SUMMARYFILE" ] || panic 51 "No se encuentra el índice de capturas"
+		local LASTONE="$(head -n1 "$SUMMARYFILE")"
+		[ -r "$LASTONE" ] || panic 52 "No se encuentra el fichero de captura <b>$LASTONE</b>"
+		local PROGRAMNAME="$(basename $EXTERNALPREVIEW)"
+		[ "$(which "$PROGRAMNAME")" ] || panic 54 "No se encuentra el programa <b>$PROGRAMNAME</b> para previsualizar archivos"
+		_debug "$(generate_command "$EXTERNALPREVIEW" "" "$LASTONE")"
+		env sh -s <<< "$(generate_command "$EXTERNALPREVIEW" "" "$LASTONE")"
+}
+
+function cache_store() {
+		local FILENAME="$1"
+		local _CACHEDIR="$(get_setting CACHE_DIRECTORY)"
+		local AMWIDTH="$(get_setting AM_THUMBNAIL_WIDTH "" number)"
+		local AMHEIGHT="$(get_setting AM_THUMBNAIL_HEIGHT "" number)"
+		[ "$_CACHEDIR" ] || panic 55 "No se ha especificado el directorio de caché"
+		local CACHEDIR="$(generate_filename "$_CACHEDIR")"
+		_debug $CACHEDIR
+		[ -d "$CACHEDIR" ] || mkdir p "$CACHEDIR"
+		[ -r "$FILENAME" ] || return
+		local IMAGEFILENAME="$(util_filename "$FILENAME" t)"
+		local IMAGEFILEEXT="$(util_fextension "$FILENAME")"
+		local IMAGEDIR="$(util_dirname "$FILENAME")"
+		local CACHEFILE="${CACHEDIR}/thumb_${IMAGEFILENAME}.jpg"
+		_debug $AMWIDTH x $AMHEIGHT
+		if [ -r "$CACHEFILE" ] &&
+					 [ -n "$(identify -format "%w %h" "$CACHEFILE" | awk "{ if (\$1 <=${AMWIDTH} && \$2 <= ${AMHEIGHT}) print \"true\"}")" ]; then
+				# Cache file is already created and it looks good
+				echo $CACHEFILE
+				return
+		fi
+		convert "$FILENAME" -resize ${AMWIDTH}x${AMHEIGHT}\> "$CACHEFILE"
+
+		echo $CACHEFILE
+}
+
+function join_by() {
+		local IFS="$1";
+		shift;
+		echo "$*";
+}
+
+function do_qr_code() {
+		local FILENAME="$1"
+		local QRDELETE="$(get_boolean "$(get_setting QR_DELETE_IMAGE)")"
+		local QRCONTENT
+		QRCONTENT="$($ZBAR_EXE "$FILENAME")"
+		local STATUS=$?
+
+		if [ $STATUS -eq 0 ]; then
+				$ZENITY_EXE --info --title="gscreenshot" --text="$QRCONTENT"
+				[ "$QRDELETE" ] && rm "$FILENAME"
+		else
+				$ZENITY_EXE --error --title="gscreenshot" --text="No se encontró el código QR"
+		fi
+}
+
+function do_image_menu() {
+		local IMAGEFILE="$1"
+		local AMWIDTH="$(get_setting AM_WIDTH "" number)"
+		local AMHEIGHT="$(get_setting AM_HEIGHT "" number)"
+		[ "$PYTHON_GTK" ] || panic 57 "No se ha instalado Python o PyGTK"
+
+		_OPTIONS=("quick-edit=Edición rápida"
+						 "edit=Editar")
+		_OPTIONS+=("qr-code=Buscar QR-code")
+		_OPTIONS+=("exit=Salir")
+
+		OPTIONS="$(join_by $'\n' "${_OPTIONS[@]}" | sed '{:a;N;s/\n/\\n/g;t a}')"
+
+		local ACTION="$($PYTHON_EXE <<EOF
+# -*- coding: utf-8 -*-
+import gi
+gi.require_version('Gtk', '3.0')
+from gi.repository import Gtk, Gdk, GdkPixbuf
+
+class PyMenu(Gtk.Window):
+    def __init__(self, imageFile, width, height, options):
+        super(PyMenu, self).__init__()
+        self.zoom=1
+
+        self.set_size_request(width, height)
+        self.set_position(Gtk.WindowPosition.CENTER)
+        self.connect("destroy", Gtk.main_quit)
+        self.set_title("Vista previa de imagen")
+
+        grid = Gtk.Grid();
+        grid.set_column_spacing(20)
+        grid.set_row_spacing(20)
+
+        label = Gtk.Label(label="Texto introductorio")
+        self.box = Gtk.ScrolledWindow()
+        self.box.set_policy(Gtk.PolicyType.AUTOMATIC,
+                       Gtk.PolicyType.AUTOMATIC)
+
+        self.pixbuf = GdkPixbuf.Pixbuf.new_from_file(imageFile)
+        self.image = Gtk.Image()
+        self.image.set_from_pixbuf(self.pixbuf)
+        self.connect("size-allocate", self.on_size_allocate)
+        self.box.add(self.image)
+        self.box.set_hexpand(True)
+        self.box.set_vexpand(True)
+
+        buttonsData=options.split('\n')
+        buttonbox = Gtk.Box(spacing=6)
+
+        for i in buttonsData:
+            btpart=i.partition('=')
+            btn=Gtk.Button(btpart[2].strip())
+            btn.userdata=btpart[0].strip()
+            btn.connect("clicked", self.on_button_clicked)
+            buttonbox.pack_start(btn, True, True, 0)
+
+        grid.add(label)
+        grid.attach(self.box,0,1,1,1)
+        grid.attach(buttonbox, 0, 2, 1, 1)
+
+        self.add(grid)
+        self.show_all()
+
+        self.image.set_size_request(self.box.get_allocation().width, height=self.box.get_allocation().height)
+
+    def on_size_allocate(self, obj, rect):
+        k_pixbuf = float(self.pixbuf.props.height) / self.pixbuf.props.width
+        # rect = self.box.get_allocation()
+        k_rect = float(rect.height) / rect.width
+
+        if k_pixbuf < k_rect:
+        	  newWidth = rect.width
+        	  newHeight = int(newWidth * k_pixbuf)
+        else:
+            newHeight = rect.height
+            newWidth = int(newHeight / k_pixbuf)
+
+        base_pixbuf = self.image.get_pixbuf()
+        if base_pixbuf.props.height == newHeight and base_pixbuf.props.width == newWidth:
+            return
+
+        base_pixbuf = self.pixbuf.scale_simple(
+            newWidth*self.zoom,
+            newHeight*self.zoom,
+            GdkPixbuf.InterpType.BILINEAR
+        )
+
+        self.image.set_from_pixbuf(base_pixbuf)
+
+    def on_button_clicked(self, widget):
+        print(widget.userdata)
+        self.destroy()
+
+PyMenu("${IMAGEFILE}",${AMWIDTH},${AMHEIGHT}, "${OPTIONS}")
+Gtk.main()
+EOF
+		)"
+
+		case "$ACTION" in
+				"quick-edit")
+						do_invoke "PROGRAM_QUICK_EDIT" "$ACTION" "$IMAGEFILE"
+						;;
+				"edit")
+						do_invoke "PROGRAM_EDIT" "$ACTION" "$IMAGEFILE"
+						;;
+				"qr-code")
+						do_qr_code "$IMAGEFILE"
+						;;
+				*)
+						;;
+		esac
+
+}
+
+function do_invoke() {
+		local INVOCATION="$1"
+		local ACTION="$2"
+		local IMAGEFILE="$3"
+
+		local PROGRAM="$(get_setting "$INVOCATION")"
+
+		[ -n "$PROGRAM" ] || panic 58 "No se ha especificado el programa externo para $ACTION"
+		local PROGRAMNAME="$(basename $PROGRAM)"
+		[ "$(which "$PROGRAMNAME")" ] || panic 59 "No se encuentra el programa <b>$PROGRAMNAME</b> para $ACTION"
+
+		_debug "$(generate_command "$PROGRAM" " " "$IMAGEFILE")"
+		env sh -s <<< "$(generate_command "$PROGRAM" " " "$IMAGEFILE")"
+
+}
+
+function do_actions() {
+		local SUMMARYFILE="$(summary_file)"
+		local AMWIDTH="$(get_setting AM_WIDTH "" number)"
+		local AMHEIGHT="$(get_setting AM_HEIGHT "" number)"
+
+		local EXIT=
+		while [ ! $EXIT ]; do
+				IFS=$'\n\r' &&	local FILES=($(cat "$SUMMARYFILE")) && unset IFS
+				local THUMBNAILS=()
+
+				for (( fi=0; fi < ${#FILES[@]}; fi++)); do
+						local FILE=${FILES[fi]}
+						local THUMB=("$(cache_store "$FILE")")
+						local RESOL
+						local FSIZE
+						_debug "AKA --- $THUMB"
+
+						[ "$THUMB" ] &&
+								RESOL="$(identify -format "%wx%h" "$FILE")" &&
+								FSIZE="$(numfmt --to=iec-i --suffix=B --format="%.3f" "$(stat -c%s "$FILE")")" &&
+								IFS=$'\n'&& THUMBNAILS+=("$(echo -e "${THUMB}\t${FILE}\t${RESOL}\t${FSIZE}")") && unset IFS
+
+						echo $(((fi+1)*100/${#FILES[@]}))
+				done > >(gui_progress "Creando miniaturas...")
+
+				local OPTIONS=()
+				IFS=$'\n' && for THF in ${THUMBNAILS[@]};do
+						IFS=$'\t' && for t in $THF; do
+								local THUMB="${t[0]}"
+								local FILE="${t[1]}"
+								local DIMS="${t[2]}"
+								local SIZE="${t[3]}"
+								OPTIONS+=("$THUMB")
+								OPTIONS+=("$FILE")
+								OPTIONS+=("$DIMS")
+								OPTIONS+=("$SIZE")
+						done
+				done
+				OUTPUT=$($ZENITY_EXE --list --width $AMWIDTH --height $AMHEIGHT \
+										--text "Elige uno" \
+										--separator=$'\t' \
+										--imagelist \
+										--print-column 2 \
+										--ok-label="Vista previa" \
+										--cancel-label="Salir" \
+										--column "Vista previa" \
+										--column "Nombre del archivo" \
+										--column "Dimensiones" \
+										--column "Tamaño" ${OPTIONS[@]})
+				local STATUS=$?
+				if [ "$STATUS" -eq 0 ]; then
+						# Vista previa y mas
+						do_image_menu "$OUTPUT"
+				else
+						EXIT=1
+				fi
+		done
+		# (
+		# 		for (( i=0; i<100; i++ )); do
+		# 				sleep 0.1
+		# 				echo $i
+		# 		done
+		# ) | gui_progress "Creando miniaturas..."
+}
+
+function cond_write() {
+		local COND="$1"
+		local WRITEOK="$2"
+		local WRITERR="$3"
+
+		if [ "$COND" ]; then
+				echo -en "$WRITEOK";
+		else
+				echo -en "$WRITERR";
+		fi
+}
+
+function do_dependency_check() {
+		show_version
+		echo
+		check_dependencies 1
+		echo -en "Maim: "
+		cond_write "$([ -n "$MAIM_EXE" ] && echo 1)" "[${GREENOK}]\n" "[${REDERR}]\n"
+		echo -en "Convert: "
+		cond_write "$([ -n "$CONVERT_EXE" ] && echo 1)" "[${GREENOK}]\n" "[${REDERR}]\n"
+		echo -en "Identify: "
+		cond_write "$([ -n "$IDENTIFY_EXE" ] && echo 1)" "[${GREENOK}]\n" "[${REDERR}]\n"
+		echo -en "Mogrify: "
+		cond_write "$([ -n "$MOGRIFY_EXE" ] && echo 1)" "[${GREENOK}]\n" "[${REDERR}]\n"
+		echo -en "Notify-send: "
+		cond_write "$([ -n "$NOTIFY_EXE" ] && echo 1)" "[${GREENOK}]\n" "[${REDERR}]\n"
+		echo -en "Recents (no obligatorio): "
+		cond_write "$([ -n "$RECENTS_EXE" ] && echo 1)" "[${GREENOK}]\n" "[${REDERR}]\n"
+		echo -en "Zenity: "
+		cond_write "$([ -n "$ZENITY_EXE" ] && echo 1)" "[${GREENOK}]\n" "[${REDERR}]\n"
+		echo -en "Zbar: "
+		cond_write "$([ -n "$ZBAR_EXE" ] && echo 1)" "[${GREENOK}]\n" "[${REDERR}]\n"
+		echo -en "Python: "
+		cond_write "$([ -n "$PYTHON_EXE" ] && echo 1)" "[${GREENOK}]\n" "[${REDERR}]\n"
+		echo -en "Gtk for Python: "
+		cond_write "$([ -n "$PYTHON_GTK" ] && echo 1)" "[${GREENOK}]\n" "[${REDERR}]\n"
+}
+
+ARGS=$(getopt -q -o "t:aphvc" -l "type:,actions,preview,version,help,check" -n "args" -- "$@");
+if [ $? -ne 0 ];
+then
+    echo "Ha habido un error al procesar los argumentos."
+    exit 1
+fi
+
+eval set -- "$ARGS";
+
+JOB=
+TYPE=
+
+while [ $# -gt 0 ]; do
+		case "$1" in
+				-t|--type)
+						if [ -z "$(check_sc_tpe $2)" ]; then
+								panic 1 "Tipo de captura incorrecto. Vea la ayuda"
+						fi
+						JOB="capture"
+						TYPE="$2"
+						shift;
+						;;
+				-p|--preview)
+						JOB="preview"
+						shift;
+						;;
+				-a|--actions)
+						JOB="actions"
+						shift;
+						;;
+				-v|--version)
+						show_version
+						exit 0
+						;;
+				-c|--check)
+						do_dependency_check
+						exit 0
+						;;
+				-h|--help)
+						help
+						exit 0
+						;;
+				--)
+						shift;
+						break;
+						;;
+		esac
+		shift
+done
+
+check_dependencies
+
+if [ "$JOB" ]; then
+		if ! _MAINCONFIG=$(read_config); then
+				echo "Puede crear un fichero de configuración para establecer algunos parámetros comunes."
+				echo
+		fi
+		declare -A MAINCONFIG="${_MAINCONFIG[@]}"
+		# echo ${MAINCONFIG[@]}
+fi
+
+case "$JOB" in
+		"capture")
+				do_capture "$TYPE"
+				;;
+		"preview")
+				do_preview
+				;;
+		"actions")
+				do_actions
+				;;
+		*)
+				panic 2 "Trabajo desconocido"
+				;;
+esac
